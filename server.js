@@ -191,12 +191,20 @@ async function consultarECAC(pfxPath, senha) {
 }
 
 async function extrairTodosDados(context) {
+  // Primeiro navega na página principal pra descobrir as URLs corretas
+  const paginaPrincipal = await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/', 'Principal');
+  console.log('Página principal:', paginaPrincipal.titulo, paginaPrincipal.conteudo?.substring(0, 500));
+
   return {
-    situacaoFiscal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/extrato/mrelconta.asp', 'Situação Fiscal'),
-    debitos: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/extrato/DebitosConsulta.asp', 'Débitos'),
-    caixaPostal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/mensagens/Mensagens.asp', 'Caixa Postal'),
-    declaracoes: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/declaracoes/Declaracoes.asp', 'Declarações'),
-    parcelamentos: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/extrato/parcelamento.asp', 'Parcelamentos'),
+    situacaoFiscal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/situacaofiscal', 'Situação Fiscal')
+      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/certidao/emitir.asp', 'Situação Fiscal')),
+    debitos: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/dividas', 'Débitos')
+      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/divida/ConsultaDebitos.asp', 'Débitos')),
+    caixaPostal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/mensagens', 'Caixa Postal')
+      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/caixapostal/', 'Caixa Postal')),
+    declaracoes: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/declaracoes', 'Declarações')
+      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/declaracoes/', 'Declarações')),
+    paginaPrincipal,
   };
 }
 
