@@ -137,7 +137,7 @@ async function consultarECAC(pfxPath, senha) {
     }
 
     // PASSO 3: Aguarda qualquer redirect
-    await page.waitForURL(url => !url.includes('cav.receita.fazenda.gov.br/autenticacao/login'), { timeout: 30000 });
+    await page.waitForURL(url => !String(url).includes('autenticacao/login'), { timeout: 30000 });
     console.log('Redirecionado para:', page.url());
 
     // PASSO 4: Se estiver em acesso.gov.br, seleciona certificado
