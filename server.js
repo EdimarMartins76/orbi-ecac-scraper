@@ -8,43 +8,26 @@ app.use(express.json({ limit: '50mb' }));
 
 const API_KEY = process.env.API_KEY;
 
-// Health check
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    servico: 'Orbi e-CAC Scraper',
-    versao: '1.0.0',
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: 'ok', servico: 'Orbi e-CAC Scraper', versao: '2.0.0', timestamp: new Date().toISOString() });
 });
 
-// Middleware autenticação
 function autenticar(req, res, next) {
   if (API_KEY) {
     const key = req.headers['x-api-key'];
-    if (key !== API_KEY) {
-      return res.status(401).json({ erro: 'Chave de API inválida' });
-    }
+    if (key !== API_KEY) return res.status(401).json({ erro: 'Chave de API inválida' });
   }
   next();
 }
 
-// Endpoint principal
 app.post('/ecac/consultar', autenticar, async (req, res) => {
   const { pfxBase64, pfxSenha, cnpj } = req.body;
-
   if (!pfxBase64 || !pfxSenha) {
-    return res.status(400).json({
-      sucesso: false,
-      erro: 'pfxBase64 e pfxSenha são obrigatórios',
-    });
+    return res.status(400).json({ sucesso: false, erro: 'pfxBase64 e pfxSenha são obrigatórios' });
   }
-
   const tempId = crypto.randomUUID();
   const pfxPath = '/tmp/cert_' + tempId + '.pfx';
-
   console.log('[' + new Date().toISOString() + '] Iniciando consulta e-CAC' + (cnpj ? ' CNPJ ' + cnpj : ''));
-
   try {
     fs.writeFileSync(pfxPath, Buffer.from(pfxBase64, 'base64'));
     const resultado = await consultarECAC(pfxPath, pfxSenha);
@@ -57,15 +40,41 @@ app.post('/ecac/consultar', autenticar, async (req, res) => {
   }
 });
 
+async function clicarGovBr(page) {
+  // Tenta múltiplos seletores possíveis para o botão Gov.br
+  const seletores = [
+    'a[href*="acesso.gov.br"]',
+    'a[href*="sso.acesso.gov.br"]',
+    'button:has-text("Gov.br")',
+    'a:has-text("Gov.br")',
+    'button:has-text("gov.br")',
+    'a:has-text("gov.br")',
+    '[class*="govbr"]',
+    '[id*="govbr"]',
+    'input[value*="gov"]',
+    'button[type="submit"]',
+  ];
+  for (const sel of seletores) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 3000 })) {
+        console.log('Botão Gov.br encontrado com seletor: ' + sel);
+        await el.click();
+        return true;
+      }
+    } catch {}
+  }
+  // Última tentativa: pega o HTML pra debug
+  const html = await page.content();
+  const snippet = html.substring(0, 3000);
+  console.log('HTML da página (primeiros 3000 chars):', snippet);
+  throw new Error('Botão Gov.br não encontrado. HTML: ' + snippet.substring(0, 500));
+}
+
 async function consultarECAC(pfxPath, senha) {
   const browser = await chromium.launch({
     headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-    ],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
   });
 
   try {
@@ -83,26 +92,49 @@ async function consultarECAC(pfxPath, senha) {
 
     // PASSO 1: Acessa e-CAC
     console.log('Acessando e-CAC...');
-    await page.goto('https://cav.receita.fazenda.gov.br/autenticacao/login', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
+    await page.goto('https://cav.receita.fazenda.gov.br', {
+      waitUntil: 'networkidle',
+      timeout: 45000,
     });
 
-    // PASSO 2: Clica em "Entrar com Gov.br"
-    console.log('Clicando em Gov.br...');
-    await page.locator('a[href*="acesso.gov.br"], a[href*="gov.br"], button:has-text("gov.br")').first().click();
-    await page.waitForURL(/acesso\.gov\.br/, { timeout: 30000 });
+    console.log('URL atual:', page.url());
+    console.log('Título:', await page.title());
+
+    // PASSO 2: Clica em Gov.br
+    console.log('Buscando botão Gov.br...');
+    await clicarGovBr(page);
+
+    // Aguarda redirect para acesso.gov.br
+    await page.waitForURL(/acesso\.gov\.br|gov\.br/, { timeout: 30000 });
+    console.log('Em Gov.br:', page.url());
 
     // PASSO 3: Seleciona Certificado Digital
-    console.log('Selecionando certificado digital...');
-    await page.waitForTimeout(2000);
-    await page.locator('text=Certificado Digital, button:has-text("Certificado"), [data-type="certificate"]').first().click();
+    await page.waitForTimeout(3000);
+    console.log('Selecionando certificado...');
+    const seletoresCert = [
+      'text=Certificado Digital',
+      'button:has-text("Certificado")',
+      'a:has-text("Certificado")',
+      '[data-type="certificate"]',
+      '[class*="certificate"]',
+      'text=certificado',
+    ];
+    for (const sel of seletoresCert) {
+      try {
+        const el = page.locator(sel).first();
+        if (await el.isVisible({ timeout: 3000 })) {
+          console.log('Opção certificado encontrada:', sel);
+          await el.click();
+          break;
+        }
+      } catch {}
+    }
 
-    // Aguarda autenticação mTLS e retorno ao e-CAC
+    // Aguarda retorno ao e-CAC
     await page.waitForURL(/cav\.receita\.fazenda\.gov\.br/, { timeout: 60000 });
-    console.log('Autenticado!');
+    console.log('Autenticado! URL:', page.url());
 
-    // PASSO 4: Extrai todos os dados
+    // PASSO 4: Extrai dados
     const dados = {
       situacaoFiscal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/extrato/mrelconta.asp', 'Situação Fiscal'),
       debitos: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/extrato/DebitosConsulta.asp', 'Débitos'),
@@ -125,11 +157,7 @@ async function extrairPagina(context, url, nome) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     const titulo = await page.title();
     const conteudo = await page.locator('body').textContent();
-    return {
-      sucesso: true,
-      titulo,
-      conteudo: (conteudo || '').trim().substring(0, 5000),
-    };
+    return { sucesso: true, titulo, conteudo: (conteudo || '').trim().substring(0, 5000) };
   } catch (e) {
     console.error('Erro em ' + nome + ':', e.message);
     return { sucesso: false, erro: e.message };
@@ -140,5 +168,5 @@ async function extrairPagina(context, url, nome) {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log('Orbi e-CAC Scraper rodando na porta ' + PORT);
+  console.log('Orbi e-CAC Scraper v2.0 rodando na porta ' + PORT);
 });
