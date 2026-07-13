@@ -40,52 +40,47 @@ app.post('/ecac/consultar', autenticar, async (req, res) => {
   }
 });
 
-async function clicarGovBr(page) {
-  // Seletores priorizados — primeiro os que levam diretamente ao SSO/OAuth
+async function clicarGovBr(page, todosLinks) {
+  // Primeiro tenta link direto para acesso.gov.br (OAuth)
+  if (todosLinks) {
+    const linkOAuth = todosLinks.find(l =>
+      l.href && l.href.includes('acesso.gov.br') &&
+      !l.href.includes('receitafederal') &&
+      !l.href.includes('canais_atendimento')
+    );
+    if (linkOAuth) {
+      console.log('Navegando direto para OAuth:', linkOAuth.href);
+      await page.goto(linkOAuth.href, { waitUntil: 'load', timeout: 30000 });
+      return true;
+    }
+  }
+
+  // Seletores priorizados
   const seletores = [
     'a[href*="sso.acesso.gov.br"]',
     'a[href*="acesso.gov.br/authorize"]',
     'a[href*="acesso.gov.br/login"]',
-    'button[onclick*="acesso.gov.br"]',
-    // Botão de login (não link informativo)
-    'a.btn:has-text("Gov.br")',
+    'a[href*="acesso.gov.br"]:not([href*="receitafederal"]):not([href*="canais"])',
     'button.btn:has-text("Gov.br")',
-    '[class*="login"]:has-text("Gov.br")',
-    '[class*="entrar"]:has-text("Gov.br")',
-    'a[href*="acesso.gov.br"]',
-    // Último recurso — qualquer link gov.br exceto páginas informativas
-    'a[href*="acesso.gov.br"]:not([href*="receitafederal"])',
+    'a.btn:has-text("Gov.br")',
+    '.login-govbr',
+    '[data-govbr]',
   ];
+
   for (const sel of seletores) {
     try {
       const el = page.locator(sel).first();
       if (await el.isVisible({ timeout: 2000 })) {
         const href = await el.getAttribute('href').catch(() => '');
-        console.log('Botão Gov.br encontrado: ' + sel + ' href=' + href);
-        // Ignora links que vão para páginas informativas
-        if (href && (href.includes('receitafederal') || href.includes('canais_atendimento'))) {
-          console.log('Pulando link informativo: ' + href);
-          continue;
-        }
+        console.log('Clicando:', sel, 'href=', href);
         await el.click();
         return true;
       }
     } catch {}
   }
-  // Tenta clicar no primeiro link com href contendo acesso.gov.br
-  const links = await page.locator('a').all();
-  for (const link of links) {
-    try {
-      const href = await link.getAttribute('href');
-      if (href && href.includes('acesso.gov.br') && !href.includes('receitafederal')) {
-        console.log('Clicando link acesso.gov.br direto: ' + href);
-        await link.click();
-        return true;
-      }
-    } catch {}
-  }
+
   const html = await page.content();
-  throw new Error('Botão login Gov.br não encontrado. HTML: ' + html.substring(0, 500));
+  throw new Error('Link OAuth Gov.br não encontrado. HTML: ' + html.substring(0, 800));
 }
 
 async function consultarECAC(pfxPath, senha) {
@@ -110,7 +105,7 @@ async function consultarECAC(pfxPath, senha) {
 
     // PASSO 1: Acessa e-CAC
     console.log('Acessando e-CAC...');
-    await page.goto('https://cav.receita.fazenda.gov.br', {
+    await page.goto('https://cav.receita.fazenda.gov.br/autenticacao/login', {
       waitUntil: 'load',
       timeout: 45000,
     });
@@ -118,9 +113,20 @@ async function consultarECAC(pfxPath, senha) {
     console.log('URL atual:', page.url());
     console.log('Título:', await page.title());
 
-    // PASSO 2: Clica em Gov.br
-    console.log('Buscando botão Gov.br...');
-    await clicarGovBr(page);
+    // Log todos os links da página para identificar o botão correto
+    const todosLinks = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('a, button')).map(el => ({
+        tag: el.tagName,
+        text: el.textContent?.trim().substring(0, 50),
+        href: el.getAttribute('href') || '',
+        classes: el.className || '',
+      }));
+    });
+    console.log('LINKS DA PÁGINA:', JSON.stringify(todosLinks.slice(0, 20)));
+
+    // PASSO 2: Encontra e clica no link de login correto (que vai para acesso.gov.br)
+    console.log('Buscando link de login Gov.br...');
+    await clicarGovBr(page, todosLinks);
 
     // Aguarda redirect para acesso.gov.br (SSO)
     await page.waitForURL(/acesso\.gov\.br/, { timeout: 30000 });
