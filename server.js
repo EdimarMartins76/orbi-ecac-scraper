@@ -94,7 +94,7 @@ async function consultarECAC(pfxPath, senha) {
     // PASSO 1: Acessa e-CAC
     console.log('Acessando e-CAC...');
     await page.goto('https://cav.receita.fazenda.gov.br', {
-      waitUntil: 'networkidle',
+      waitUntil: 'load',
       timeout: 45000,
     });
 
