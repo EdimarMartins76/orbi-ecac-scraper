@@ -8,7 +8,7 @@ app.use(express.json({ limit: '50mb' }));
 const API_KEY = process.env.API_KEY;
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', versao: '5.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', versao: '6.0.0', timestamp: new Date().toISOString() });
 });
 
 function autenticar(req, res, next) {
@@ -20,7 +20,7 @@ app.post('/ecac/consultar', autenticar, async (req, res) => {
   const { pfxBase64, pfxSenha, cnpj } = req.body;
   if (!pfxBase64 || !pfxSenha) return res.status(400).json({ sucesso: false, erro: 'pfxBase64 e pfxSenha obrigatórios' });
   const pfxPath = '/tmp/cert_' + crypto.randomUUID() + '.pfx';
-  console.log('[' + new Date().toISOString() + '] v5 Consulta CNPJ ' + (cnpj || ''));
+  console.log('[' + new Date().toISOString() + '] v6 Consulta CNPJ ' + (cnpj || ''));
   try {
     fs.writeFileSync(pfxPath, Buffer.from(pfxBase64, 'base64'));
     const resultado = await consultarECAC(pfxPath, pfxSenha);
@@ -50,130 +50,113 @@ async function consultarECAC(pfxPath, senha) {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
     });
 
-    // Intercepta TODAS as requisições para capturar URL do OAuth
+    // Captura TODAS as requests para encontrar URL OAuth
     let oauthUrl = null;
+    const todasRequests = [];
     context.on('request', req => {
       const url = req.url();
-      if (url.includes('acesso.gov.br') || url.includes('sso.acesso')) {
-        console.log('REQUEST capturada:', url.substring(0, 200));
-        if (!oauthUrl && (url.includes('authorize') || url.includes('oauth') || url.includes('login'))) {
-          oauthUrl = url;
-        }
+      todasRequests.push(url);
+      if (url.includes('sso.acesso.gov.br') || (url.includes('acesso.gov.br') && url.includes('authorize'))) {
+        oauthUrl = url;
+        console.log('OAuth URL capturada!', url.substring(0, 200));
       }
     });
 
     const page = await context.newPage();
 
-    // TENTATIVA 1: acesso direto a página protegida (mTLS direto)
-    console.log('Tentativa 1: Acesso direto mTLS...');
-    await page.goto('https://cav.receita.fazenda.gov.br/eCAC/publico/extrato/mrelconta.asp', {
-      waitUntil: 'load', timeout: 30000,
-    });
-    await page.waitForTimeout(2000);
-    const urlDireto = page.url();
-    console.log('URL após acesso direto:', urlDireto);
+    // Navega login e-CAC
+    console.log('Acessando login...');
+    await page.goto('https://cav.receita.fazenda.gov.br/autenticacao/login', { waitUntil: 'load', timeout: 45000 });
+    
+    // Aguarda 10 segundos para JS renderizar
+    await page.waitForTimeout(10000);
+    console.log('URL:', page.url());
 
-    // Se não redirecionou pro login, está autenticado!
-    if (!urlDireto.includes('login') && !urlDireto.includes('autenticacao')) {
-      console.log('Autenticado via mTLS direto!');
-      return await extrairTodosDados(context);
-    }
+    // Extrai referências ao acesso.gov.br do HTML completo
+    const htmlFull = await page.content();
+    const acessoRefs = (htmlFull.match(/https?:\/\/[^"'\s]*acesso\.gov\.br[^"'\s]*/g) || []).slice(0, 10);
+    const ssoRefs = (htmlFull.match(/https?:\/\/[^"'\s]*sso\.[^"'\s]*/g) || []).slice(0, 5);
+    console.log('REFS ACESSO.GOV.BR no HTML:', JSON.stringify(acessoRefs));
+    console.log('REFS SSO no HTML:', JSON.stringify(ssoRefs));
 
-    // TENTATIVA 2: navega pro login e intercepta OAuth
-    console.log('Tentativa 2: Login page + intercept OAuth...');
-    await page.goto('https://cav.receita.fazenda.gov.br/autenticacao/login', {
-      waitUntil: 'load', timeout: 45000,
-    });
-    await page.waitForTimeout(5000);
-    console.log('URL login:', page.url());
+    // Extrai URLs dos script src
+    const scriptSrcs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('script[src]')).map(s => s.src)
+    );
+    console.log('SCRIPTS:', JSON.stringify(scriptSrcs));
 
-    // Log form1 e botões
-    const debug = await page.evaluate(() => {
-      const form = document.getElementById('form1');
-      const btns = Array.from(document.querySelectorAll('button, input[type=submit]')).map(b => ({
-        text: b.textContent?.trim().substring(0, 50),
-        cls: b.className?.substring(0, 50),
-        id: b.id,
-        type: b.type,
-      }));
-      const iframes = Array.from(document.querySelectorAll('iframe')).map(f => ({ src: f.src, id: f.id }));
-      return {
-        formHtml: form ? form.outerHTML.substring(0, 2000) : 'sem form1',
-        botoes: btns,
-        iframes,
-        bodyText: document.body.innerText?.substring(0, 500),
-      };
-    });
-    console.log('DEBUG:', JSON.stringify(debug));
-
-    // Tenta clicar botão de login pela classe br-button (Design System Gov.br)
-    const seletoresBotao = [
-      '.br-button.primary',
-      'button.br-button',
-      'button[class*="primary"]',
-      'button[class*="login"]',
-      'button[class*="govbr"]',
-      'button[id*="login"]',
-      'button[id*="govbr"]',
-      'button[id*="gov"]',
-      '#btn-login',
-      '#btnLogin',
-      'button:has-text("Entrar")',
-      'button:has-text("Acessar")',
-      'button',  // qualquer botão
-    ];
-
-    for (const sel of seletoresBotao) {
-      try {
-        const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1000 })) {
-          const txt = await el.textContent().catch(() => '');
-          console.log('Clicando:', sel, txt?.trim());
-          await el.click();
-          await page.waitForTimeout(3000);
-          const urlPos = page.url();
-          console.log('URL após clique:', urlPos);
-          if (!urlPos.includes('/autenticacao/login')) break;
+    // Busca botão no Shadow DOM recursivamente
+    const shadowResult = await page.evaluate(() => {
+      function findClickable(root, depth) {
+        if (depth > 5) return null;
+        const els = root.querySelectorAll('button, a, [role="button"], [onclick]');
+        for (const el of els) {
+          const txt = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+          if (txt.includes('entrar') || txt.includes('gov') || txt.includes('acessar') || txt.includes('login')) {
+            el.click();
+            return 'shadow-click:' + txt.substring(0, 50);
+          }
         }
-      } catch {}
-    }
+        // Recursão em shadow roots
+        const allEls = root.querySelectorAll('*');
+        for (const el of allEls) {
+          if (el.shadowRoot) {
+            const r = findClickable(el.shadowRoot, depth + 1);
+            if (r) return r;
+          }
+        }
+        return null;
+      }
+      return findClickable(document, 0);
+    });
+    console.log('Shadow DOM result:', shadowResult);
 
-    // Se capturou URL OAuth, navega direto
-    if (oauthUrl) {
-      console.log('Usando OAuth URL capturada:', oauthUrl.substring(0, 200));
-      await page.goto(oauthUrl, { waitUntil: 'load', timeout: 30000 });
-    }
-
-    // PASSO 3: Se estiver em gov.br, seleciona certificado
-    await page.waitForTimeout(3000);
-    const urlAtual = page.url();
-    console.log('URL atual:', urlAtual);
-
-    if (urlAtual.includes('gov.br') && urlAtual.includes('acesso')) {
-      // Log página do acesso.gov.br
-      const debugAcesso = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('button, a, h1, h2, h3')).map(el => ({
-          tag: el.tagName,
-          text: el.textContent?.trim().substring(0, 60),
-          href: el.getAttribute('href') || '',
-          cls: el.className?.substring(0, 40),
-        })).filter(e => e.text);
+    // Se não clicou nada, tenta injetar click via JS no primeiro link visível
+    if (!shadowResult) {
+      await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a'));
+        for (const a of links) {
+          const rect = a.getBoundingClientRect();
+          const txt = a.textContent?.toLowerCase() || '';
+          if (rect.width > 50 && rect.height > 20 && (txt.includes('gov') || txt.includes('entrar') || txt.includes('login'))) {
+            a.click();
+            console.log('Clicou link:', txt);
+            return;
+          }
+        }
       });
-      console.log('ACESSO.GOV.BR elementos:', JSON.stringify(debugAcesso.slice(0, 20)));
+    }
 
-      const certSels = [
-        'text=Certificado Digital',
-        'button:has-text("Certificado")',
-        'a:has-text("Certificado")',
-        '[href*="certificado"]',
-        '[class*="certificate"]',
-      ];
-      for (const sel of certSels) {
+    // Aguarda qualquer redirect
+    try {
+      await page.waitForURL(url => !String(url).includes('/autenticacao/login'), { timeout: 15000 });
+      console.log('Redirect para:', page.url());
+    } catch {
+      console.log('Sem redirect após 15s. URL:', page.url());
+    }
+
+    // Se temos URL OAuth, navega direto
+    if (oauthUrl) {
+      console.log('Navegando OAuth URL:', oauthUrl.substring(0, 200));
+      await page.goto(oauthUrl, { waitUntil: 'load', timeout: 30000 });
+      await page.waitForTimeout(3000);
+      console.log('URL pós-OAuth:', page.url());
+    }
+
+    // Seleciona certificado em acesso.gov.br
+    if (page.url().includes('acesso.gov.br')) {
+      await page.waitForTimeout(3000);
+      const certEls = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button, a, [role="button"]'))
+          .filter(el => el.textContent?.toLowerCase().includes('certificado'))
+          .map(el => ({ txt: el.textContent?.trim(), cls: el.className }));
+      });
+      console.log('CERT ELS:', JSON.stringify(certEls));
+
+      for (const sel of ['text=Certificado Digital', 'button:has-text("Certificado")', 'a:has-text("Certificado")']) {
         try {
-          const el = page.locator(sel).first();
-          if (await el.isVisible({ timeout: 3000 })) {
-            console.log('Cert encontrado:', sel);
-            await el.click();
+          if (await page.locator(sel).first().isVisible({ timeout: 3000 })) {
+            await page.locator(sel).first().click();
             break;
           }
         } catch {}
@@ -181,6 +164,11 @@ async function consultarECAC(pfxPath, senha) {
 
       await page.waitForURL(/cav\.receita\.fazenda\.gov\.br(?!.*login)/, { timeout: 90000 });
       console.log('Autenticado!', page.url());
+    }
+
+    // Se ainda na página de login, mostra requests capturadas
+    if (page.url().includes('login')) {
+      console.log('TODAS REQUESTS:', JSON.stringify(todasRequests.filter(u => !u.includes('.css') && !u.includes('.png') && !u.includes('.jpg') && !u.includes('hcaptcha'))));
     }
 
     return await extrairTodosDados(context);
@@ -191,28 +179,39 @@ async function consultarECAC(pfxPath, senha) {
 }
 
 async function extrairTodosDados(context) {
-  // Primeiro navega na página principal pra descobrir as URLs corretas
-  const paginaPrincipal = await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/', 'Principal');
-  console.log('Página principal:', paginaPrincipal.titulo, paginaPrincipal.conteudo?.substring(0, 500));
+  const dados = {};
+  const paginas = [
+    { nome: 'situacaoFiscal', urls: ['https://cav.receita.fazenda.gov.br/eCAC/servicos/situacaofiscal', 'https://cav.receita.fazenda.gov.br/eCAC/'] },
+    { nome: 'debitos', urls: ['https://cav.receita.fazenda.gov.br/eCAC/servicos/dividas'] },
+    { nome: 'caixaPostal', urls: ['https://cav.receita.fazenda.gov.br/eCAC/servicos/caixapostal'] },
+    { nome: 'declaracoes', urls: ['https://cav.receita.fazenda.gov.br/eCAC/servicos/declaracoes'] },
+  ];
 
-  return {
-    situacaoFiscal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/situacaofiscal', 'Situação Fiscal')
-      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/certidao/emitir.asp', 'Situação Fiscal')),
-    debitos: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/dividas', 'Débitos')
-      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/divida/ConsultaDebitos.asp', 'Débitos')),
-    caixaPostal: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/mensagens', 'Caixa Postal')
-      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/caixapostal/', 'Caixa Postal')),
-    declaracoes: await extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/servicos/declaracoes', 'Declarações')
-      .catch(() => extrairPagina(context, 'https://cav.receita.fazenda.gov.br/eCAC/publico/declaracoes/', 'Declarações')),
-    paginaPrincipal,
-  };
+  for (const { nome, urls } of paginas) {
+    for (const url of urls) {
+      const r = await extrairPagina(context, url, nome);
+      if (r.sucesso && r.conteudo && r.conteudo.length > 50 &&
+          !r.conteudo.includes('Procuração') && !r.conteudo.includes('procurador') &&
+          !r.conteudo.includes('Formulário de login')) {
+        dados[nome] = r;
+        break;
+      }
+      dados[nome] = r;
+    }
+  }
+  return dados;
 }
 
 async function extrairPagina(context, url, nome) {
   const page = await context.newPage();
   try {
     await page.goto(url, { waitUntil: 'load', timeout: 30000 });
-    return { sucesso: true, titulo: await page.title(), conteudo: ((await page.locator('body').textContent()) || '').trim().substring(0, 5000) };
+    await page.waitForTimeout(2000);
+    const urlFinal = page.url();
+    const titulo = await page.title();
+    const conteudo = ((await page.locator('body').textContent()) || '').trim().substring(0, 3000);
+    console.log(nome, '| URL:', urlFinal, '| Titulo:', titulo, '| Conteudo:', conteudo.substring(0, 100));
+    return { sucesso: true, titulo, urlFinal, conteudo };
   } catch (e) {
     return { sucesso: false, erro: e.message };
   } finally {
@@ -221,4 +220,4 @@ async function extrairPagina(context, url, nome) {
 }
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log('Orbi e-CAC Scraper v5.0 porta ' + PORT));
+app.listen(PORT, () => console.log('Orbi e-CAC Scraper v6.0 porta ' + PORT));
