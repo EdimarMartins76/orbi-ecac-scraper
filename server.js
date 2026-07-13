@@ -79,6 +79,7 @@ async function consultarECAC(pfxPath, senha) {
 
   try {
     const context = await browser.newContext({
+      ignoreHTTPSErrors: true,
       clientCertificates: [
         { origin: 'https://acesso.gov.br', pfxPath, passphrase: senha },
         { origin: 'https://sso.acesso.gov.br', pfxPath, passphrase: senha },
