@@ -41,34 +41,51 @@ app.post('/ecac/consultar', autenticar, async (req, res) => {
 });
 
 async function clicarGovBr(page) {
-  // Tenta múltiplos seletores possíveis para o botão Gov.br
+  // Seletores priorizados — primeiro os que levam diretamente ao SSO/OAuth
   const seletores = [
-    'a[href*="acesso.gov.br"]',
     'a[href*="sso.acesso.gov.br"]',
-    'button:has-text("Gov.br")',
-    'a:has-text("Gov.br")',
-    'button:has-text("gov.br")',
-    'a:has-text("gov.br")',
-    '[class*="govbr"]',
-    '[id*="govbr"]',
-    'input[value*="gov"]',
-    'button[type="submit"]',
+    'a[href*="acesso.gov.br/authorize"]',
+    'a[href*="acesso.gov.br/login"]',
+    'button[onclick*="acesso.gov.br"]',
+    // Botão de login (não link informativo)
+    'a.btn:has-text("Gov.br")',
+    'button.btn:has-text("Gov.br")',
+    '[class*="login"]:has-text("Gov.br")',
+    '[class*="entrar"]:has-text("Gov.br")',
+    'a[href*="acesso.gov.br"]',
+    // Último recurso — qualquer link gov.br exceto páginas informativas
+    'a[href*="acesso.gov.br"]:not([href*="receitafederal"])',
   ];
   for (const sel of seletores) {
     try {
       const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 3000 })) {
-        console.log('Botão Gov.br encontrado com seletor: ' + sel);
+      if (await el.isVisible({ timeout: 2000 })) {
+        const href = await el.getAttribute('href').catch(() => '');
+        console.log('Botão Gov.br encontrado: ' + sel + ' href=' + href);
+        // Ignora links que vão para páginas informativas
+        if (href && (href.includes('receitafederal') || href.includes('canais_atendimento'))) {
+          console.log('Pulando link informativo: ' + href);
+          continue;
+        }
         await el.click();
         return true;
       }
     } catch {}
   }
-  // Última tentativa: pega o HTML pra debug
+  // Tenta clicar no primeiro link com href contendo acesso.gov.br
+  const links = await page.locator('a').all();
+  for (const link of links) {
+    try {
+      const href = await link.getAttribute('href');
+      if (href && href.includes('acesso.gov.br') && !href.includes('receitafederal')) {
+        console.log('Clicando link acesso.gov.br direto: ' + href);
+        await link.click();
+        return true;
+      }
+    } catch {}
+  }
   const html = await page.content();
-  const snippet = html.substring(0, 3000);
-  console.log('HTML da página (primeiros 3000 chars):', snippet);
-  throw new Error('Botão Gov.br não encontrado. HTML: ' + snippet.substring(0, 500));
+  throw new Error('Botão login Gov.br não encontrado. HTML: ' + html.substring(0, 500));
 }
 
 async function consultarECAC(pfxPath, senha) {
@@ -105,9 +122,9 @@ async function consultarECAC(pfxPath, senha) {
     console.log('Buscando botão Gov.br...');
     await clicarGovBr(page);
 
-    // Aguarda redirect para acesso.gov.br
-    await page.waitForURL(/acesso\.gov\.br|gov\.br/, { timeout: 30000 });
-    console.log('Em Gov.br:', page.url());
+    // Aguarda redirect para acesso.gov.br (SSO)
+    await page.waitForURL(/acesso\.gov\.br/, { timeout: 30000 });
+    console.log('Em acesso.gov.br:', page.url());
 
     // PASSO 3: Seleciona Certificado Digital
     await page.waitForTimeout(3000);
